@@ -14,6 +14,12 @@ class TaskResponse:
 class Plugin(ABC):
     """插件抽象接口（用户仅需实现此类）"""
     
+    @property
+    @abstractmethod
+    def plugin_id(self) -> str:
+        """插件类型唯一标识"""
+        pass
+    
     @abstractmethod
     def pre_init(self, config: Dict[str, Any]) -> TaskResponse:
         """插件预初始化（执行器启动时调用一次）

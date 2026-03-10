@@ -14,6 +14,10 @@ from typing import Dict, Any
 class TestPlugin(Plugin):
     """测试插件"""
     
+    @property
+    def plugin_id(self) -> str:
+        return "test_plugin"
+    
     def pre_init(self, config: Dict[str, Any]) -> TaskResponse:
         return TaskResponse(
             success=True,

@@ -79,6 +79,11 @@ from core.plugin import Plugin, TaskResponse
 from typing import Dict, Any
 
 class MyPlugin(Plugin):
+    @property
+    def plugin_id(self) -> str:
+        """插件类型唯一标识"""
+        return "my_plugin"
+    
     def pre_init(self, config: Dict[str, Any]) -> TaskResponse:
         """初始化插件"""
         try:

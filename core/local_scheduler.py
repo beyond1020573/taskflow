@@ -35,7 +35,7 @@ class LocalScheduler(BaseScheduler):
                 plugin = plugin_class()
                 pre_init_result = plugin.pre_init(config)
                 if pre_init_result.success:
-                    executor = Executor(plugin, plugin_id)
+                    executor = Executor(plugin)
                     executor_group.add_executor(executor)
                 else:
                     self.logger.error(f"Failed to pre_init plugin {plugin_id}: {pre_init_result.message}")

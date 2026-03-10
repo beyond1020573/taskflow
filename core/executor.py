@@ -17,18 +17,16 @@ class ExecutorStatus(Enum):
 class Executor:
     """执行器"""
     
-    def __init__(self, plugin: Plugin, plugin_id: str):
+    def __init__(self, plugin: Plugin):
         """
         Args:
             plugin: 插件实例
-            plugin_id: 插件 ID
         """
         self.plugin = plugin
-        self.plugin_id = plugin_id
         self.status = ExecutorStatus.READY
         self.last_heartbeat = time.time()
         self.process: Optional[multiprocessing.Process] = None
-        self.logger = Logger.get_logger(f"executor_{plugin_id}")
+        self.logger = Logger.get_logger(f"executor_{plugin.plugin_id}")
     
     def heartbeat(self) -> None:
         """更新心跳时间"""
