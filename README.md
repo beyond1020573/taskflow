@@ -75,42 +75,129 @@ pip install -r requirements.txt
 ### 2. 开发插件
 
 ```python
-from taskflow.core.plugin import Plugin
+from core.plugin import Plugin, TaskResponse
 from typing import Dict, Any
 
 class MyPlugin(Plugin):
-    def pre_init(self, config: Dict[str, Any]) -> bool:
-        # 初始化插件
-        return True
+    def pre_init(self, config: Dict[str, Any]) -> TaskResponse:
+        """初始化插件"""
+        try:
+            # 模拟加载配置/资源
+            self.model_path = config.get("model_path")
+            if not self.model_path:
+                return TaskResponse(
+                    success=False,
+                    code="param/missing",
+                    message="插件配置缺失model_path参数",
+                    data={"required_params": ["model_path"]}
+                )
+            return TaskResponse(
+                success=True,
+                code="success",
+                message="插件初始化成功",
+                data={"model_path": self.model_path}
+            )
+        except Exception as e:
+            return TaskResponse(
+                success=False,
+                code="plugin/init_failed",
+                message=f"插件初始化失败：{str(e)}",
+                data={"error_detail": str(e)}
+            )
     
-    def execute(self, task_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        # 执行单次任务
-        return {'result': 'Success'}
+    def execute(self, task_id: str, params: Dict[str, Any]) -> TaskResponse:
+        """执行单次任务"""
+        try:
+            # 模拟业务逻辑
+            result = {"task_id": task_id, "result": "Success", "params": params}
+            return TaskResponse(
+                success=True,
+                code="success",
+                message="单次任务执行成功",
+                data=result
+            )
+        except Exception as e:
+            return TaskResponse(
+                success=False,
+                code="plugin/exec_error",
+                message=f"单次任务执行失败：{str(e)}",
+                data={"task_id": task_id}
+            )
     
-    def start_long_task(self, task_id: str, params: Dict[str, Any]) -> bool:
-        # 启动长时任务
-        return True
+    def start_long_task(self, task_id: str, params: Dict[str, Any]) -> TaskResponse:
+        """启动长时任务"""
+        try:
+            # 模拟检查任务冲突
+            if hasattr(self, "running_long_task") and self.running_long_task:
+                return TaskResponse(
+                    success=False,
+                    code="task/conflict",
+                    message=f"已有长时任务运行：{self.running_long_task}",
+                    data={"current_task_id": self.running_long_task, "new_task_id": task_id}
+                )
+            # 模拟启动长时任务
+            self.running_long_task = task_id
+            return TaskResponse(
+                success=True,
+                code="success",
+                message="长时任务启动成功",
+                data={"task_id": task_id, "estimated_time": "1h"}
+            )
+        except Exception as e:
+            return TaskResponse(
+                success=False,
+                code="plugin/long_task_failed",
+                message=f"长时任务启动失败：{str(e)}",
+                data={"task_id": task_id}
+            )
     
-    def stop_long_task(self, task_id: str) -> bool:
-        # 停止长时任务
-        return True
+    def stop_long_task(self, task_id: str) -> TaskResponse:
+        """停止长时任务"""
+        try:
+            if not hasattr(self, "running_long_task") or self.running_long_task != task_id:
+                return TaskResponse(
+                    success=False,
+                    code="task/not_found",
+                    message=f"未找到运行中的长时任务：{task_id}",
+                    data={"task_id": task_id}
+                )
+            # 模拟停止长时任务
+            self.running_long_task = None
+            return TaskResponse(
+                success=True,
+                code="success",
+                message="长时任务停止成功",
+                data={"task_id": task_id}
+            )
+        except Exception as e:
+            return TaskResponse(
+                success=False,
+                code="plugin/stop_failed",
+                message=f"长时任务停止失败：{str(e)}",
+                data={"task_id": task_id}
+            )
     
     def destroy(self) -> None:
-        # 资源销毁
-        pass
+        """资源销毁"""
+        # 模拟清理资源
+        self.running_long_task = None
+        self.model_path = None
 ```
 
 ### 3. 使用本地调度器
 
 ```python
-from taskflow.core.local_scheduler import LocalScheduler
-from taskflow.core.task import Task, TaskMode
+from core.local_scheduler import LocalScheduler
+from core.task import Task, TaskMode
 
 # 创建调度器
 scheduler = LocalScheduler()
 
-# 注册插件
-scheduler.register_plugin('my_plugin', MyPlugin, {}, max_executors=2)
+# 注册插件（带配置）
+plugin_config = {
+    "model_path": "/path/to/model"
+}
+scheduler.register_plugin('my_plugin', MyPlugin, plugin_config, max_executors=2)
 
 # 提交任务
 task = Task(
@@ -120,8 +207,55 @@ task = Task(
     params={'key': 'value'}
 )
 
+# 提交单次任务并处理响应
 result = scheduler.submit_task(task)
-print(result)
+if result.success:
+    print(f"任务执行成功：{result.data}")
+else:
+    print(f"任务执行失败：{result.code} - {result.message}")
+
+# 提交长时任务
+long_task = Task(
+    task_id='long_task_1',
+    plugin_id='my_plugin',
+    mode=TaskMode.LONG,
+    params={'duration': '1h'}
+)
+
+# 提交长时任务并处理响应
+start_result = scheduler.submit_task(long_task)
+if start_result.success:
+    print(f"长时任务启动成功：{start_result.data}")
+else:
+    print(f"长时任务启动失败：{start_result.code} - {start_result.message}")
+
+# 尝试启动另一个长时任务（应该失败，因为已有任务在运行）
+another_long_task = Task(
+    task_id='long_task_2',
+    plugin_id='my_plugin',
+    mode=TaskMode.LONG,
+    params={'duration': '30min'}
+)
+
+conflict_result = scheduler.submit_task(another_long_task)
+if conflict_result.success:
+    print(f"长时任务启动成功：{conflict_result.data}")
+else:
+    print(f"长时任务启动失败：{conflict_result.code} - {conflict_result.message}")
+
+# 停止长时任务并处理响应
+stop_result = scheduler.stop_long_task('long_task_1', 'my_plugin')
+if stop_result.success:
+    print(f"长时任务停止成功：{stop_result.data}")
+else:
+    print(f"长时任务停止失败：{stop_result.code} - {stop_result.message}")
+
+# 尝试停止不存在的任务
+stop_nonexistent_result = scheduler.stop_long_task('nonexistent_task', 'my_plugin')
+if stop_nonexistent_result.success:
+    print(f"长时任务停止成功：{stop_nonexistent_result.data}")
+else:
+    print(f"长时任务停止失败：{stop_nonexistent_result.code} - {stop_nonexistent_result.message}")
 
 # 关闭调度器
 scheduler.shutdown()

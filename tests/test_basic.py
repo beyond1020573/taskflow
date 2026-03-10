@@ -8,23 +8,41 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import pytest
 from core.local_scheduler import LocalScheduler
 from core.task import Task, TaskMode
-from core.plugin import Plugin
+from core.plugin import Plugin, TaskResponse
 from typing import Dict, Any
 
 class TestPlugin(Plugin):
     """测试插件"""
     
-    def pre_init(self, config: Dict[str, Any]) -> bool:
-        return True
+    def pre_init(self, config: Dict[str, Any]) -> TaskResponse:
+        return TaskResponse(
+            success=True,
+            code="success",
+            message="Plugin initialized successfully"
+        )
     
-    def execute(self, task_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        return {'result': f'Hello, {params.get("name", "World")}!', 'task_id': task_id}
+    def execute(self, task_id: str, params: Dict[str, Any]) -> TaskResponse:
+        return TaskResponse(
+            success=True,
+            code="success",
+            message="Task executed successfully",
+            data={'result': f'Hello, {params.get("name", "World")}!', 'task_id': task_id}
+        )
     
-    def start_long_task(self, task_id: str, params: Dict[str, Any]) -> bool:
-        return True
+    def start_long_task(self, task_id: str, params: Dict[str, Any]) -> TaskResponse:
+        return TaskResponse(
+            success=True,
+            code="success",
+            message="Long task started successfully",
+            data={'task_id': task_id, 'pid': os.getpid()}
+        )
     
-    def stop_long_task(self, task_id: str) -> bool:
-        return True
+    def stop_long_task(self, task_id: str) -> TaskResponse:
+        return TaskResponse(
+            success=True,
+            code="success",
+            message="Long task stopped successfully"
+        )
     
     def destroy(self) -> None:
         pass
@@ -51,8 +69,9 @@ class TestTaskFlow:
             params={'name': 'TaskFlow'}
         )
         result = self.scheduler.submit_task(task)
-        assert result['success'] is True
-        assert 'Hello, TaskFlow!' in result['result']['result']
+        assert result.success is True
+        assert result.code == 'success'
+        assert 'Hello, TaskFlow!' in result.data['result']
     
     def test_submit_long_task(self):
         """测试提交长时任务"""
@@ -63,7 +82,8 @@ class TestTaskFlow:
             params={'name': 'LongTask'}
         )
         result = self.scheduler.submit_task(task)
-        assert result['success'] is True
+        assert result.success is True
+        assert result.code == 'success'
     
     def test_stop_long_task(self):
         """测试停止长时任务"""
@@ -75,11 +95,13 @@ class TestTaskFlow:
             params={'name': 'LongTask'}
         )
         start_result = self.scheduler.submit_task(task)
-        assert start_result['success'] is True
+        assert start_result.success is True
+        assert start_result.code == 'success'
         
         # 停止长时任务
         stop_result = self.scheduler.stop_long_task('test_task_3', 'test_plugin')
-        assert stop_result['success'] is True
+        assert stop_result.success is True
+        assert stop_result.code == 'success'
     
     def test_invalid_plugin(self):
         """测试无效插件"""
@@ -90,5 +112,6 @@ class TestTaskFlow:
             params={'name': 'Test'}
         )
         result = self.scheduler.submit_task(task)
-        assert result['success'] is False
-        assert 'not registered' in result['error_message']
+        assert result.success is False
+        assert result.code == 'plugin/not_registered'
+        assert '未注册' in result.message
