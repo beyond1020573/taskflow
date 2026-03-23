@@ -12,25 +12,55 @@ class FaceRecognitionPlugin(Plugin):
         return "face_recognition"
     
     def pre_init(self, config: Dict[str, Any]) -> TaskResponse:
-        """初始化插件，加载 InsightFace 人脸模型"""
+        """初始化插件，加载 InsightFace 人脸模型
+        
+        Args:
+            config: 插件配置字典
+                - model_name: 模型名称（默认 buffalo_l）
+                - device: 设备类型，支持 "cuda"(强制GPU), "auto"(自动降级), "cpu"(强制CPU)
+                - ctx_id: 上下文 ID（默认 0）
+        
+        Returns:
+            TaskResponse: 初始化结果
+        """
         try:
             from insightface.app import FaceAnalysis
             
             # 获取模型配置
             model_name = config.get("model_name", "buffalo_l")
-            device = config.get("device", "cuda")
+            device = config.get("device", "auto")
             ctx_id = config.get("ctx_id", 0)
+            
+            # 根据 device 参数构建 providers 列表
+            if device == "cuda":
+                # 强制 GPU 模式：仅使用 CUDA，如果不可用则抛出异常
+                providers = ['CUDAExecutionProvider']
+            elif device == "auto":
+                # 智能自动模式：优先 GPU，自动回退到 CPU
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            elif device == "cpu":
+                # 强制 CPU 模式：仅使用 CPU
+                providers = ['CPUExecutionProvider']
+            else:
+                # 无效的 device 参数
+                return TaskResponse(
+                    success=False,
+                    code="plugin/invalid_config",
+                    message=f"无效的 device 参数：{device}，支持的选项为 'cuda', 'auto', 'cpu'",
+                    data={"invalid_device": device, "supported_devices": ["cuda", "auto", "cpu"]}
+                )
             
             # 加载模型
             self.model = FaceAnalysis(
                 name=model_name,
-                providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+                providers=providers
             )
             self.model.prepare(ctx_id=ctx_id, det_size=(640, 640))
             
             # 保存配置
             self.model_name = model_name
             self.device = device
+            self.providers = providers
             
             return TaskResponse(
                 success=True,
@@ -39,6 +69,7 @@ class FaceRecognitionPlugin(Plugin):
                 data={
                     "model_name": model_name,
                     "device": device,
+                    "providers": providers,
                     "ctx_id": ctx_id
                 }
             )
@@ -69,7 +100,10 @@ class FaceRecognitionPlugin(Plugin):
                     message="缺少必需参数：image",
                     data={"required_params": ["image"]}
                 )
-            
+                
+            # 初始化 image 变量，避免静态检查警告
+            image = None
+
             # 转换图像数据
             if isinstance(image_data, str):
                 # 如果是文件路径，读取图像
@@ -152,3 +186,4 @@ class FaceRecognitionPlugin(Plugin):
             del self.model
         self.model_name = None
         self.device = None
+        self.providers = None
