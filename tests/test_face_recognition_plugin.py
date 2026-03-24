@@ -1,12 +1,16 @@
 import sys
 import os
 import pytest
+import time
+import subprocess
+import json
 from unittest.mock import Mock, patch, MagicMock
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from plugins.face_recognition_plugin import FaceRecognitionPlugin
+from core.result_writer import ResultWriter, PrintResultWriter
 
 
 class TestFaceRecognitionPluginPreInit:
@@ -428,3 +432,374 @@ class TestFaceRecognitionPluginExecute:
         assert "landmark_3d_68" in face_data
         assert "pose" in face_data
         assert "embedding" in face_data
+
+
+class TestFaceRecognitionPluginLongTask:
+    """FaceRecognitionPlugin 长时任务单元测试（使用 FFmpeg）"""
+    
+    def _create_mock_face(self, bbox=None, det_score=0.95):
+        """创建模拟的人脸对象"""
+        mock_face = Mock()
+        mock_face.bbox = np.array(bbox) if bbox else np.array([10, 10, 100, 100])
+        mock_face.det_score = det_score
+        return mock_face
+    
+    def _setup_plugin(self):
+        """设置已初始化的插件"""
+        plugin = FaceRecognitionPlugin()
+        mock_model = Mock()
+        plugin.model = mock_model
+        plugin.model_name = "buffalo_l"
+        plugin.device = "auto"
+        plugin.providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        return plugin, mock_model
+    
+    def _create_mock_process(self, width=640, height=480, num_frames=3):
+        """创建模拟的 FFmpeg 进程"""
+        mock_process = Mock()
+        frame_size = width * height * 3
+        frames = [np.zeros((height, width, 3), dtype=np.uint8).tobytes() for _ in range(num_frames)]
+        
+        read_index = [0]
+        
+        def mock_read(size):
+            if read_index[0] < len(frames):
+                data = frames[read_index[0]]
+                read_index[0] += 1
+                return data
+            return b''
+        
+        mock_process.stdout.read = mock_read
+        mock_process.terminate = Mock()
+        mock_process.wait = Mock()
+        mock_process.kill = Mock()
+        return mock_process
+    
+    def _create_mock_ffprobe_result(self, width=1920, height=1080):
+        """创建模拟的 ffprobe 结果"""
+        return json.dumps({
+            "streams": [{
+                "width": width,
+                "height": height,
+                "codec_type": "video"
+            }]
+        })
+    
+    def test_get_stream_resolution_success(self):
+        """测试 ffprobe 获取视频流分辨率成功"""
+        plugin, _ = self._setup_plugin()
+        
+        mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stdout = self._create_mock_ffprobe_result(1920, 1080)
+        
+        with patch('subprocess.run', return_value=mock_result):
+            width, height, error = plugin._get_stream_resolution("rtsp://test")
+            
+            assert width == 1920
+            assert height == 1080
+            assert error is None
+    
+    def test_get_stream_resolution_ffprobe_error(self):
+        """测试 ffprobe 执行失败"""
+        plugin, _ = self._setup_plugin()
+        
+        mock_result = Mock()
+        mock_result.returncode = 1
+        mock_result.stderr = "ffprobe error"
+        
+        with patch('subprocess.run', return_value=mock_result):
+            width, height, error = plugin._get_stream_resolution("rtsp://invalid")
+            
+            assert width is None
+            assert height is None
+            assert "ffprobe 执行失败" in error
+    
+    def test_get_stream_resolution_no_streams(self):
+        """测试视频流中无视频轨道"""
+        plugin, _ = self._setup_plugin()
+        
+        mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"streams": []})
+        
+        with patch('subprocess.run', return_value=mock_result):
+            width, height, error = plugin._get_stream_resolution("rtsp://test")
+            
+            assert width is None
+            assert height is None
+            assert "未找到视频流" in error
+    
+    def test_get_stream_resolution_ffprobe_not_found(self):
+        """测试 ffprobe 未安装"""
+        plugin, _ = self._setup_plugin()
+        
+        with patch('subprocess.run', side_effect=FileNotFoundError()):
+            width, height, error = plugin._get_stream_resolution("rtsp://test")
+            
+            assert width is None
+            assert height is None
+            assert "ffprobe 未安装" in error
+    
+    def test_get_stream_resolution_timeout(self):
+        """测试 ffprobe 执行超时"""
+        plugin, _ = self._setup_plugin()
+        
+        with patch('subprocess.run', side_effect=subprocess.TimeoutExpired(cmd="ffprobe", timeout=10)):
+            width, height, error = plugin._get_stream_resolution("rtsp://test")
+            
+            assert width is None
+            assert height is None
+            assert "超时" in error
+    
+    def test_start_long_task_auto_resolution(self):
+        """测试 start_long_task 自动获取分辨率"""
+        plugin, mock_model = self._setup_plugin()
+        
+        mock_writer = Mock(spec=ResultWriter)
+        mock_process = self._create_mock_process(width=1920, height=1080, num_frames=2)
+        mock_ffprobe_result = Mock()
+        mock_ffprobe_result.returncode = 0
+        mock_ffprobe_result.stdout = self._create_mock_ffprobe_result(1920, 1080)
+        
+        with patch('subprocess.run', return_value=mock_ffprobe_result):
+            with patch('subprocess.Popen', return_value=mock_process):
+                mock_model.get.return_value = [self._create_mock_face()]
+                
+                result = plugin.start_long_task("task_001", {
+                    "stream_url": "rtsp://test",
+                    "result_writer": mock_writer
+                })
+                
+                assert result.success is True
+                assert result.data["width"] == 1920
+                assert result.data["height"] == 1080
+                
+                time.sleep(0.2)
+                plugin.stop_long_task("task_001")
+    
+    def test_start_long_task_resolution_error(self):
+        """测试 start_long_task 获取分辨率失败"""
+        plugin, mock_model = self._setup_plugin()
+        
+        mock_writer = Mock(spec=ResultWriter)
+        mock_ffprobe_result = Mock()
+        mock_ffprobe_result.returncode = 1
+        mock_ffprobe_result.stderr = "error"
+        
+        with patch('subprocess.run', return_value=mock_ffprobe_result):
+            result = plugin.start_long_task("task_001", {
+                "stream_url": "rtsp://invalid",
+                "result_writer": mock_writer
+            })
+            
+            assert result.success is False
+            assert result.code == "stream/resolution_error"
+            assert "无法获取视频流分辨率" in result.message
+    
+    def test_start_long_task_missing_stream_url(self):
+        """测试 start_long_task 缺少 stream_url 参数"""
+        plugin, _ = self._setup_plugin()
+        
+        result = plugin.start_long_task("task_001", {})
+        
+        assert result.success is False
+        assert result.code == "param/missing"
+        assert "缺少必需参数：stream_url" in result.message
+        assert result.data["required_params"] == ["stream_url"]
+    
+    def test_start_long_task_plugin_not_initialized(self):
+        """测试 start_long_task 插件未初始化"""
+        plugin = FaceRecognitionPlugin()
+        
+        result = plugin.start_long_task("task_001", {"stream_url": "rtsp://test"})
+        
+        assert result.success is False
+        assert result.code == "plugin/not_initialized"
+        assert "插件未初始化" in result.message
+    
+    def test_start_long_task_already_running(self):
+        """测试 start_long_task 任务已在运行"""
+        plugin, mock_model = self._setup_plugin()
+        
+        mock_writer = Mock(spec=ResultWriter)
+        mock_process = self._create_mock_process()
+        mock_ffprobe_result = Mock()
+        mock_ffprobe_result.returncode = 0
+        mock_ffprobe_result.stdout = self._create_mock_ffprobe_result()
+        
+        with patch('subprocess.run', return_value=mock_ffprobe_result):
+            with patch('subprocess.Popen', return_value=mock_process):
+                mock_model.get.return_value = [self._create_mock_face()]
+                
+                result1 = plugin.start_long_task("task_001", {
+                    "stream_url": "rtsp://test",
+                    "result_writer": mock_writer
+                })
+                
+                assert result1.success is True
+                
+                result2 = plugin.start_long_task("task_001", {
+                    "stream_url": "rtsp://test",
+                    "result_writer": mock_writer
+                })
+                
+                assert result2.success is False
+                assert result2.code == "task/already_running"
+                
+                plugin.stop_long_task("task_001")
+    
+    def test_stop_long_task_not_found(self):
+        """测试 stop_long_task 任务不存在"""
+        plugin, _ = self._setup_plugin()
+        
+        result = plugin.stop_long_task("task_001")
+        
+        assert result.success is False
+        assert result.code == "task/not_found"
+        assert "任务 task_001 不存在" in result.message
+    
+    def test_stop_long_task_success(self):
+        """测试 stop_long_task 成功停止"""
+        plugin, mock_model = self._setup_plugin()
+        
+        mock_writer = Mock(spec=ResultWriter)
+        mock_process = self._create_mock_process(num_frames=10)
+        mock_ffprobe_result = Mock()
+        mock_ffprobe_result.returncode = 0
+        mock_ffprobe_result.stdout = self._create_mock_ffprobe_result()
+        
+        with patch('subprocess.run', return_value=mock_ffprobe_result):
+            with patch('subprocess.Popen', return_value=mock_process):
+                mock_model.get.return_value = [self._create_mock_face()]
+                
+                plugin.start_long_task("task_001", {
+                    "stream_url": "rtsp://test",
+                    "result_writer": mock_writer
+                })
+                
+                time.sleep(0.1)
+                
+                result = plugin.stop_long_task("task_001")
+                
+                assert result.success is True
+                assert result.code == "success"
+                assert "长时任务 task_001 已停止" in result.message
+    
+    def test_long_task_result_writer_called(self):
+        """测试长时任务调用 result_writer"""
+        plugin, mock_model = self._setup_plugin()
+        
+        mock_writer = Mock(spec=ResultWriter)
+        mock_process = self._create_mock_process(num_frames=3)
+        mock_ffprobe_result = Mock()
+        mock_ffprobe_result.returncode = 0
+        mock_ffprobe_result.stdout = self._create_mock_ffprobe_result()
+        
+        with patch('subprocess.run', return_value=mock_ffprobe_result):
+            with patch('subprocess.Popen', return_value=mock_process):
+                mock_model.get.return_value = [self._create_mock_face()]
+                
+                plugin.start_long_task("task_001", {
+                    "stream_url": "rtsp://test",
+                    "result_writer": mock_writer
+                })
+                
+                time.sleep(0.3)
+                
+                assert mock_writer.write.called
+                
+                plugin.stop_long_task("task_001")
+    
+    def test_long_task_ffmpeg_not_found(self):
+        """测试长时任务 FFmpeg 未安装"""
+        plugin, mock_model = self._setup_plugin()
+        
+        mock_writer = Mock(spec=ResultWriter)
+        mock_ffprobe_result = Mock()
+        mock_ffprobe_result.returncode = 0
+        mock_ffprobe_result.stdout = self._create_mock_ffprobe_result()
+        
+        with patch('subprocess.run', return_value=mock_ffprobe_result):
+            with patch('subprocess.Popen', side_effect=FileNotFoundError("ffmpeg not found")):
+                plugin.start_long_task("task_001", {
+                    "stream_url": "rtsp://invalid",
+                    "result_writer": mock_writer
+                })
+                
+                time.sleep(0.2)
+                
+                assert mock_writer.write.called
+                call_args = mock_writer.write.call_args
+                assert call_args[0][0] == "task_001"
+                assert call_args[0][1]["status"] == "error"
+                assert "FFmpeg 未安装" in call_args[0][1]["message"]
+    
+    def test_destroy_stops_all_long_tasks(self):
+        """测试 destroy 停止所有长时任务"""
+        plugin, mock_model = self._setup_plugin()
+        
+        mock_writer = Mock(spec=ResultWriter)
+        mock_process = self._create_mock_process(num_frames=10)
+        mock_ffprobe_result = Mock()
+        mock_ffprobe_result.returncode = 0
+        mock_ffprobe_result.stdout = self._create_mock_ffprobe_result()
+        
+        with patch('subprocess.run', return_value=mock_ffprobe_result):
+            with patch('subprocess.Popen', return_value=mock_process):
+                mock_model.get.return_value = [self._create_mock_face()]
+                
+                plugin.start_long_task("task_001", {
+                    "stream_url": "rtsp://test1",
+                    "result_writer": mock_writer
+                })
+                plugin.start_long_task("task_002", {
+                    "stream_url": "rtsp://test2",
+                    "result_writer": mock_writer
+                })
+                
+                time.sleep(0.1)
+                
+                assert len(plugin._long_tasks) == 2
+                
+                plugin.destroy()
+                
+                assert len(plugin._long_tasks) == 0
+    
+    def test_build_ffmpeg_command(self):
+        """测试 FFmpeg 命令构建"""
+        plugin, _ = self._setup_plugin()
+        
+        cmd = plugin._build_ffmpeg_command("rtsp://test", 1920, 1080)
+        
+        assert 'ffmpeg' in cmd
+        assert '-i' in cmd
+        assert 'rtsp://test' in cmd
+        assert '-f' in cmd
+        assert 'rawvideo' in cmd
+        assert '-pix_fmt' in cmd
+        assert 'bgr24' in cmd
+        assert '-s' in cmd
+        assert '1920x1080' in cmd
+
+
+class TestResultWriter:
+    """ResultWriter 单元测试"""
+    
+    def test_print_result_writer(self):
+        """测试 PrintResultWriter"""
+        from core.result_writer import PrintResultWriter
+        
+        writer = PrintResultWriter()
+        result = writer.write("task_001", {"status": "success", "face_count": 1})
+        
+        assert result is True
+        
+        writer.close()
+    
+    def test_result_writer_abstract(self):
+        """测试 ResultWriter 抽象类"""
+        from core.result_writer import ResultWriter
+        
+        with pytest.raises(TypeError):
+            ResultWriter()
